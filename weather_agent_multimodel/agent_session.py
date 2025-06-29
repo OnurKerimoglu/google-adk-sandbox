@@ -62,6 +62,29 @@ def get_weather(city: str) -> dict:
     else:
         return {"status": "error", "error_message": f"Sorry, I don't have weather information for '{city}'."}
 
+def create_weather_agent(
+        agent_name,
+        model,
+        AGENT_MODEL,
+    ):
+    weather_agent = None # Initialize to None
+    try:
+        weather_agent = Agent(
+            name=agent_name,
+            model=model, # Can be a string for Gemini or a LiteLlm object
+            description="Provides weather information for specific cities.",
+            instruction="You are a helpful weather assistant. "
+                        "When the user asks for the weather in a specific city, "
+                        "use the 'get_weather' tool to find the information. "
+                        "If the tool returns an error, inform the user politely. "
+                        "If the tool is successful, present the weather report clearly.",
+            tools=[get_weather], # Pass the function directly
+        )
+        print(f"Agent '{weather_agent.name}' created using model '{AGENT_MODEL}'.")
+    except Exception as e:
+        print(f"Failed to create agent using model '{AGENT_MODEL}'. Error: {e}")
+    return weather_agent
+
 async def create_session(
         MODEL_SHORT_NAME="gpt",  # ['gpt', 'claude', 'gemini']
         APP_NAME_ROOT="weather_app",
@@ -72,10 +95,6 @@ async def create_session(
     APP_NAME = f"{APP_NAME_ROOT}_{MODEL_SHORT_NAME}"
     USER_ID = f"{USER_ID_ROOT}_{MODEL_SHORT_NAME}"
     SESSION_ID = f"{SESSION_ID_ROOT}_{MODEL_SHORT_NAME}"
-    
-    # Create the agent
-    weather_agent = None # Initialize to None
-    runner = None      # Initialize runner to None
 
     if MODEL_SHORT_NAME == "gpt":
         MODEL_GPT = os.getenv("MODEL_GPT")
@@ -96,21 +115,12 @@ async def create_session(
         AGENT_MODEL = MODEL_GEMINI
         model = AGENT_MODEL  #If Gemini, use the model directly
 
-    try:
-        weather_agent_gpt = Agent(
-            name=f"weather_agent_{MODEL_SHORT_NAME}",
-            model=model, # Can be a string for Gemini or a LiteLlm object
-            description="Provides weather information for specific cities.",
-            instruction="You are a helpful weather assistant. "
-                        "When the user asks for the weather in a specific city, "
-                        "use the 'get_weather' tool to find the information. "
-                        "If the tool returns an error, inform the user politely. "
-                        "If the tool is successful, present the weather report clearly.",
-            tools=[get_weather], # Pass the function directly
-        )
-        print(f"Agent '{weather_agent_gpt.name}' created using model '{AGENT_MODEL}'.")
-    except Exception as e:
-        print(f"Failed to create GPT agent using model '{AGENT_MODEL}'. Error: {e}")
+    # Create the agent
+    weather_agent = create_weather_agent(
+        agent_name=f"weather_agent_{MODEL_SHORT_NAME}",
+        model=model,
+        AGENT_MODEL=AGENT_MODEL
+    )
 
     # --- Session Management ---
     # Key Concept: SessionService stores conversation history & state.
@@ -130,7 +140,7 @@ async def create_session(
     # --- Runner ---
     # Key Concept: Runner orchestrates the agent execution loop.
     runner = Runner(
-        agent=weather_agent_gpt, # The agent we want to run
+        agent=weather_agent, # The agent we want to run
         app_name=APP_NAME,   # Associates runs with our app
         session_service=session_service # Uses our session manager
     )
