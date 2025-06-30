@@ -19,6 +19,9 @@ from typing import Optional
 
 import asyncio
 from google.adk.agents import Agent
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
@@ -184,12 +187,60 @@ def create_weather_agent_team(
                         "For anything else, respond appropriately or state you cannot handle it.",
             tools=[get_weather], # Pass the function directly
             sub_agents=sub_agents,
-            output_key=output_key # <<< Auto-save agent's final weather response
+            output_key=output_key, # <<< Auto-save agent's final weather response
+            before_model_callback=block_keyword_guardrail
         )
         print(f"Root Agent '{weather_agent_team.name}' created using model '{agent_model}' with sub-agents: {[sa.name for sa in weather_agent_team.sub_agents]}.")
     except Exception as e:
         print(f"Failed to create weather agent team using model '{agent_model}'. Error: {e}")
     return weather_agent_team
+
+def block_keyword_guardrail(
+        callback_context: CallbackContext,
+        llm_request: LlmRequest
+    ) -> Optional[LlmResponse]:
+    """
+    Inspects the latest user message for 'BLOCK'. If found, blocks the LLM call
+    and returns a predefined LlmResponse. Otherwise, returns None to proceed.
+    """
+    agent_name = callback_context.agent_name # Get the name of the agent whose model call is being intercepted
+    print(f"--- Callback: block_keyword_guardrail running for agent: {agent_name} ---")
+
+    # Extract the text from the latest user message in the request history
+    last_user_message_text = ""
+    if llm_request.contents:
+        # Find the most recent message with role 'user'
+        for content in reversed(llm_request.contents):
+            if content.role == 'user' and content.parts:
+                # Assuming text is in the first part for simplicity
+                if content.parts[0].text:
+                    last_user_message_text = content.parts[0].text
+                    break # Found the last user message text
+
+    print(f"--- Callback: Inspecting last user message: '{last_user_message_text[:100]}...' ---") # Log first 100 chars
+
+    # --- Guardrail Logic ---
+    keyword_to_block = "BLOCK"
+    if keyword_to_block in last_user_message_text.upper(): # Case-insensitive check
+        print(f"--- Callback: Found '{keyword_to_block}'. Blocking LLM call! ---")
+        # Optionally, set a flag in state to record the block event
+        callback_context.state["guardrail_block_keyword_triggered"] = True
+        print(f"--- Callback: Set state 'guardrail_block_keyword_triggered': True ---")
+
+        # Construct and return an LlmResponse to stop the flow and send this back instead
+        return LlmResponse(
+            content=types.Content(
+                role="model", # Mimic a response from the agent's perspective
+                parts=[types.Part(text=f"I cannot process this request because it contains the blocked keyword '{keyword_to_block}'.")],
+            )
+            # Note: You could also set an error_message field here if needed
+        )
+    else:
+        # Keyword not found, allow the request to proceed to the LLM
+        print(f"--- Callback: Keyword not found. Allowing LLM call for {agent_name}. ---")
+        return None # Returning None signals ADK to continue normally
+
+    print("✅ block_keyword_guardrail function defined.")
 
 def get_model_constants(
         model_short_name,
@@ -332,16 +383,19 @@ async def run_stateful_team_conversation():
         )
         print(f"Runner created for agent '{runner_stateful.agent.name}'.")
 
-
+        # Use the runner for the agent with the callback and the existing stateful session ID
+        # Define a helper lambda for cleaner interaction calls
+        interaction_func = lambda query: call_agent_async(query,
+                                                         runner_stateful,
+                                                         user_id, # Use existing user ID
+                                                         session_id # Use existing session ID
+                                                        )
+        
         print("\n--- Testing State: Temp Unit Conversion & output_key ---")
 
         # 1. Check weather (Uses initial state: Celsius)
         print("--- Turn 1: Requesting weather in London (expect Celsius) ---")
-        await call_agent_async(query= "What's the weather in London?",
-                               runner=runner_stateful,
-                               user_id=user_id,
-                               session_id=session_id
-                              )
+        await interaction_func(query="What's the weather in London?")
 
         # 2. Manually update state preference to Fahrenheit - DIRECTLY MODIFY STORAGE
         print("\n--- Manually Updating State: Setting unit to Fahrenheit ---")
@@ -361,24 +415,19 @@ async def run_stateful_team_conversation():
         except Exception as e:
              print(f"--- Error updating internal session state: {e} ---")
 
-        # 3. Check weather again (Tool should now use Fahrenheit)
-        # This will also update 'last_weather_report' via output_key
-        print("\n--- Turn 2: Requesting weather in New York (expect Fahrenheit) ---")
-        await call_agent_async(query= "Tell me the weather in New York.",
-                               runner=runner_stateful,
-                               user_id=user_id,
-                               session_id=session_id
-                              )
+        # 3 Request containing the blocked keyword (Callback intercepts)
+        print("\n--- Turn 3: Requesting with blocked keyword (expect blocked) ---")
+        await interaction_func(query="BLOCK the request for weather in Tokyo") # Callback should catch "BLOCK"
 
-        # 4. Test basic delegation (should still work)
+        # 4. Check weather again (Tool should now use Fahrenheit)
+        # This will also update 'last_weather_report' via output_key
+        print("\n--- Turn 4: Requesting weather in New York (expect Fahrenheit) ---")
+        await interaction_func(query="Tell me the weather in New York.")
+
+        # 5. Test basic delegation (should still work)
         # This will update 'last_weather_report' again, overwriting the NY weather report
-        print("\n--- Turn 3: Sending a greeting ---")
-        await call_agent_async(query= "Hi!",
-                               runner=runner_stateful,
-                               user_id=user_id,
-                               session_id=session_id
-                              )
-        
+        print("\n--- Turn 5: Sending a greeting ---")
+        await interaction_func(query="Hi!")
 
         print("\n--- Inspecting Final Session State ---")
         final_session = await session_service.get_session(
