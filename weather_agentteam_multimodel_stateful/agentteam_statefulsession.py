@@ -15,11 +15,12 @@
 # Import necessary libraries
 import os
 from dotenv import load_dotenv
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import asyncio
 from google.adk.agents import Agent
 from google.adk.agents.callback_context import CallbackContext
+from google.adk.tools.base_tool import BaseTool
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.models.lite_llm import LiteLlm
@@ -188,7 +189,8 @@ def create_weather_agent_team(
             tools=[get_weather], # Pass the function directly
             sub_agents=sub_agents,
             output_key=output_key, # <<< Auto-save agent's final weather response
-            before_model_callback=block_keyword_guardrail
+            before_model_callback=block_keyword_guardrail,
+            before_tool_callback=block_city_tool_guardrail
         )
         print(f"Root Agent '{weather_agent_team.name}' created using model '{agent_model}' with sub-agents: {[sa.name for sa in weather_agent_team.sub_agents]}.")
     except Exception as e:
@@ -241,6 +243,52 @@ def block_keyword_guardrail(
         return None # Returning None signals ADK to continue normally
 
     print("✅ block_keyword_guardrail function defined.")
+
+def block_city_tool_guardrail(
+        tool: BaseTool,
+        args: Dict[str, Any],
+        tool_context: ToolContext
+    ) -> Optional[Dict]:
+    """
+    Checks if 'get_weather_stateful' is called for defined cities.
+    If so, blocks the tool execution and returns a specific error dictionary.
+    Otherwise, allows the tool call to proceed by returning None.
+    """
+    tool_name = tool.name
+    agent_name = tool_context.agent_name # Agent attempting the tool call
+    print(f"--- Callback: block_city_tool_guardrail running for tool '{tool_name}' in agent '{agent_name}' ---")
+    print(f"--- Callback: Inspecting args: {args} ---")
+
+    # --- Guardrail Logic ---
+    target_tool_name = "get_weather" # Match the function name used by FunctionTool
+    blocked_cities = ["paris"]
+
+    # Check if it's the correct tool and the city argument matches the blocked city
+    if tool_name == target_tool_name:
+        city_argument = args.get("city", "") # Safely get the 'city' argument
+        if city_argument and city_argument.lower() in blocked_cities:
+            print(f"--- Callback: Detected blocked city '{city_argument}'. Blocking tool execution! ---")
+            # Optionally update state
+            tool_context.state["guardrail_tool_block_triggered"] = True
+            print(f"--- Callback: Set state 'guardrail_tool_block_triggered': True ---")
+
+            # Return a dictionary matching the tool's expected output format for errors
+            # This dictionary becomes the tool's result, skipping the actual tool run.
+            return {
+                "status": "error",
+                "error_message": f"Policy restriction: Weather checks for '{city_argument.capitalize()}' are currently disabled by a tool guardrail."
+            }
+        else:
+             print(f"--- Callback: City '{city_argument}' is allowed for tool '{tool_name}'. ---")
+    else:
+        print(f"--- Callback: Tool '{tool_name}' is not the target tool. Allowing. ---")
+
+
+    # If the checks above didn't return a dictionary, allow the tool to execute
+    print(f"--- Callback: Allowing tool '{tool_name}' to proceed. ---")
+    return None # Returning None allows the actual tool function to run
+
+    print("✅ block_city_tool_guardrail function defined.")
 
 def get_model_constants(
         model_short_name,
@@ -415,9 +463,13 @@ async def run_stateful_team_conversation():
         except Exception as e:
              print(f"--- Error updating internal session state: {e} ---")
 
-        # 3 Request containing the blocked keyword (Callback intercepts)
-        print("\n--- Turn 3: Requesting with blocked keyword (expect blocked) ---")
-        await interaction_func(query="BLOCK the request for weather in Tokyo") # Callback should catch "BLOCK"
+        # # 3 Request containing the blocked keyword (Callback intercepts)
+        # print("\n--- Turn 3: Requesting with blocked keyword (expect blocked by input guardrail) ---")
+        # await interaction_func(query="BLOCK the request for weather in Tokyo") # Callback should catch "BLOCK"
+
+        # 3. Blocked city (Should pass model callback, but be blocked by tool callback)
+        print("\n--- Turn 3: Requesting weather in Paris (expect blocked by tool guardrail) ---")
+        await interaction_func("How about Paris?") # Tool callback should intercept this
 
         # 4. Check weather again (Tool should now use Fahrenheit)
         # This will also update 'last_weather_report' via output_key
@@ -426,8 +478,8 @@ async def run_stateful_team_conversation():
 
         # 5. Test basic delegation (should still work)
         # This will update 'last_weather_report' again, overwriting the NY weather report
-        print("\n--- Turn 5: Sending a greeting ---")
-        await interaction_func(query="Hi!")
+        print("\n--- Turn 5: Sending a farewell ---")
+        await interaction_func(query="Thanks, bye!")
 
         print("\n--- Inspecting Final Session State ---")
         final_session = await session_service.get_session(
